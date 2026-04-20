@@ -3,11 +3,20 @@ Bitcoin Price Forecasting Portal
 ==================================
 A Streamlit application for time-series analysis and forecasting of Bitcoin prices.
 
-This app supports:
-- Multiple forecasting models (Prophet, ARIMA, LSTM Deep Learning)
-- Interactive visualizations with Plotly
-- Customizable forecast horizons and confidence intervals
-- Backtesting with performance metrics
+Supported models:
+- Prophet          — trend + seasonality decomposition
+- ARIMA            — classical auto-regressive model (auto order selection)
+- LSTM             — two-layer deep learning neural network (TensorFlow/Keras)
+- Hybrid           — Prophet global trend + LSTM residual correction
+
+Other features:
+- CSV and ZIP file upload with automatic column detection
+- Automatic downsampling for high-frequency (minute-level) data
+- Selectable training date range
+- Dynamic test set matching the chosen forecast horizon
+- Interactive Plotly charts with confidence bands
+- Backtesting metrics: MAE, RMSE, MAPE
+- One-click forecast CSV export
 """
 
 import streamlit as st
@@ -25,9 +34,7 @@ from prophet import Prophet
 from statsmodels.tsa.arima.model import ARIMA
 from pmdarima import auto_arima
 
-# Import deep learning libraries
-# import tensorflow as tf
-# from tensorflow import keras
+# Deep learning — keras is bundled with tensorflow-cpu in requirements.txt
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
 from keras.callbacks import EarlyStopping
@@ -269,13 +276,26 @@ def train_arima_model(train_data, price_col, forecast_days, confidence_level):
     Returns:
         tuple: (trained model, forecast values, confidence intervals)
     """
+    
+    # NOTE: ARIMA multi-step forecasts on financial data (like Bitcoin) will appear
+    # as a near-horizontal line. ARIMA requires stationarity, so it models day-to-day price *changes*
+    # rather than prices directly (d=1 differencing). When forecasting multiple
+    # steps ahead, the AR coefficients decay exponentially toward zero, meaning the
+    # model's best guess for each future day converges to the last known price.
+    # This is ARIMA's way of saying: "Bitcoin prices follow a near-random walk and
+    # future direction cannot be reliably predicted with this model."
+    # min_p=1 ensures at least one AR term is always included (rather than defaulting
+    # to a pure random walk), but the decay effect still applies for long horizons.
+    # For directional multi-step forecasts, use Prophet or LSTM instead.
+
     # Extract price values as a series
     y = train_data[price_col].values
     
     # Use auto_arima to find optimal parameters
     # This automatically tests different (p,d,q) combinations
     auto_model = auto_arima(
-        y,
+        y, start_p=1, start_q=1,   # begin search from p=1, q=1
+        min_p=1,                 # never allow p=0 — forces AR terms, avoids random walk
         seasonal=False,           # Bitcoin doesn't have strict seasonal patterns
         stepwise=True,            # Faster parameter search
         suppress_warnings=True,   # Cleaner output
@@ -762,12 +782,13 @@ def main():
     # Application title and description
     st.title("₿ Bitcoin Price Forecasting Portal")
     st.markdown("""
-    Welcome to the **Bitcoin Forecasting App**! This tool allows you to:
-    - Upload Bitcoin historical data from Kaggle or Yahoo Finance
-    - Choose between **Prophet**, **ARIMA**, or **LSTM Deep Learning** models
-    - Customize forecast horizons and confidence intervals
-    - Visualize predictions with interactive charts
-    - Evaluate model performance with backtesting metrics
+    Welcome to the **Bitcoin Forecasting App**! Upload a Bitcoin historical data CSV (or ZIP) and:
+    - Choose between **Prophet**, **ARIMA**, **LSTM Deep Learning**, or **Hybrid (Prophet + LSTM)** models
+    - Select the training date range and forecast horizon
+    - Customize confidence intervals and (for LSTM models) the lookback window
+    - Visualize predictions with interactive charts and confidence bands
+    - Evaluate model performance with backtesting metrics (MAE, RMSE, MAPE)
+    - Export the forecast to CSV
     """)
     
     st.markdown("---")
@@ -783,7 +804,7 @@ def main():
     uploaded_file = st.sidebar.file_uploader(
         "Upload Bitcoin CSV or ZIP file",
         type=['csv', 'zip'],
-        help="Upload a Kaggle-style Bitcoin historical data CSV or ZIP file containing CSV"
+        help="Upload a Bitcoin historical data CSV, or a ZIP containing a CSV (e.g. the Kaggle minute-level dataset)"
     )
     
     # Only show controls if file is uploaded
@@ -1330,31 +1351,37 @@ def main():
         
         st.markdown("""
         ### Getting Started
-        
-        1. **Download a Bitcoin dataset** from Kaggle or Yahoo Finance
-        2. **Upload the CSV or ZIP** using the sidebar
-        3. **Configure** your forecasting parameters
-        4. **Choose a model**: Prophet (traditional), ARIMA (classical), or LSTM (deep learning)
-        5. **Generate** the forecast and analyze the results
-        
-        ### Recommended Dataset
-        
-        - [Bitcoin Historical Data (2014-2024)](https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data)
-        - [Yahoo Finance BTC-USD](https://finance.yahoo.com/quote/BTC-USD/history)
-        
-        ### Model Comparison
-        
-        - **Prophet**: Best for data with strong seasonal patterns and trends. Handles missing data well.
-        - **ARIMA**: Classical statistical method. Good baseline for time series forecasting.
-        - **LSTM**: Deep learning neural network. Best for complex patterns and long-term dependencies.
+
+        1. **Upload your Bitcoin historical data CSV** (or ZIP) using the sidebar
+        2. **Select a date range** to control which period is used for training
+        3. **Choose a model** and set your forecast horizon
+        4. Click **Generate Forecast** and review the results
+
+        ### Available Models
+
+        | Model | Best For | Training Time |
+        |-------|----------|---------------|
+        | **Prophet** | Strong trends & seasonality | ~10–30 s |
+        | **ARIMA** | Classical baseline, short horizons | ~20–60 s |
+        | **LSTM** | Complex non-linear patterns | ~60–120 s |
+        | **Hybrid (Prophet + LSTM)** | Global trend + local residual correction | ~90–150 s |
+
+        ### Supported Data Formats
+
+        The app auto-detects date and price columns. Any CSV with a date column
+        (`Date`, `Timestamp`, `time`, …) and at least one price column (`Close`,
+        `Open`, `High`, `Low`, `Price`, …) will work.
+
+        For **minute-level data** the app will offer to downsample to daily
+        frequency automatically — no pre-processing needed.
         """)
     
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: gray;'>
-        <p>Built with Streamlit • Plotly • Prophet • ARIMA • TensorFlow/LSTM</p>
-        <p>⚠️ For educational purposes only. Not financial advice.</p>
+        <p>Built with Streamlit · Plotly · Prophet · ARIMA · TensorFlow-CPU / Keras (LSTM) · scikit-learn</p>
+        <p>⚠️ For educational purposes only — not financial advice.</p>
     </div>
     """, unsafe_allow_html=True)
 
