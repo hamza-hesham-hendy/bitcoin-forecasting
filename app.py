@@ -1381,7 +1381,6 @@ def main():
     st.markdown("""
     <div style='text-align: center; color: gray;'>
         <p>Built with Streamlit · Plotly · Prophet · ARIMA · TensorFlow-CPU / Keras (LSTM) · scikit-learn</p>
-        <p>⚠️ For educational purposes only — not financial advice.</p>
     </div>
     """, unsafe_allow_html=True)
 
