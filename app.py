@@ -14,7 +14,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import timedelta
+from datetime import timedelta, date
 import warnings
 import zipfile
 import io
@@ -676,18 +676,20 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
                 fill='tonexty'
             ))
     
-    elif model_name == 'LSTM (Deep Learning)':
-        # LSTM forecast
+    elif 'LSTM' in model_name:
+        # LSTM or Hybrid forecast
+        forecast_name = 'LSTM Forecast' if model_name == 'LSTM (Deep Learning)' else 'Hybrid Forecast'
+        forecast_color = '#2ca02c' if model_name == 'LSTM (Deep Learning)' else '#9467bd'  # Green for LSTM, purple for Hybrid
         fig.add_trace(go.Scatter(
             x=forecast_data['ds'],
             y=forecast_data['yhat'],
             mode='lines',
-            name='LSTM Forecast',
-            line=dict(color='#2ca02c', width=2, dash='dash'),  # Green dashed line
+            name=forecast_name,
+            line=dict(color=forecast_color, width=2, dash='dash'),
             hovertemplate='<b>Date:</b> %{x}<br><b>Forecast:</b> $%{y:,.2f}<extra></extra>'
         ))
         
-        # Confidence intervals for LSTM
+        # Confidence intervals
         if 'yhat_upper' in forecast_data.columns:
             fig.add_trace(go.Scatter(
                 x=forecast_data['ds'],
@@ -704,7 +706,7 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
                 mode='lines',
                 name='Confidence Interval',
                 line=dict(width=0),
-                fillcolor='rgba(44, 160, 44, 0.2)',  # Light green shading
+                fillcolor='rgba(44, 160, 44, 0.2)' if model_name == 'LSTM (Deep Learning)' else 'rgba(148, 103, 189, 0.2)',
                 fill='tonexty'
             ))
     
@@ -885,8 +887,52 @@ def main():
             help="Select which price column to use for forecasting"
         )
         
-        # Model selection
-        st.sidebar.subheader("3. Model Selection")
+        # NEW: Prepare data to get date range
+        df_temp = validate_and_prepare_data(df, date_col, price_col)
+        min_date = df_temp[date_col].min().date()
+        max_date = df_temp[date_col].max().date()
+        
+        # NEW: Date range selection
+        st.sidebar.subheader("3. Select Training Data Period")
+        st.sidebar.write(f"📅 Available data: {min_date} to {max_date}")
+        
+        # Calculate default range (use last 3 years or all data if less)
+        try:
+            default_start = max(min_date, date(max_date.year - 3, max_date.month, max_date.day))
+        except:
+            default_start = min_date
+        
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "Start date:",
+                value=default_start,
+                min_value=min_date,
+                max_value=max_date,
+                help="First day of training data"
+            )
+        with col2:
+            end_date = st.date_input(
+                "End date:",
+                value=max_date,
+                min_value=min_date,
+                max_value=max_date,
+                help="Last day of available data"
+            )
+        
+        # Validate date range
+        if start_date >= end_date:
+            st.sidebar.error("❌ Start date must be before end date!")
+            return
+        
+        # Calculate and display number of days
+        num_days = (end_date - start_date).days
+        st.sidebar.info(f"📊 Selected: **{num_days:,} days** of data")
+        
+        if num_days < 100:
+            st.sidebar.warning("⚠️ Warning: Less than 100 days selected. Models may not perform well.")
+        
+        st.sidebar.subheader("4. Model Selection")
         model_choice = st.sidebar.radio(
             "Choose forecasting model:",
             options=['Prophet', 'ARIMA', 'LSTM (Deep Learning)', 'Hybrid (Prophet + LSTM)'],
@@ -899,7 +945,7 @@ def main():
         )
         
         # Forecast horizon
-        st.sidebar.subheader("4. Forecast Horizon")
+        st.sidebar.subheader("5. Forecast Horizon")
         forecast_days = st.sidebar.slider(
             "Days to forecast:",
             min_value=7,
@@ -910,7 +956,7 @@ def main():
         )
         
         # Confidence interval
-        st.sidebar.subheader("5. Confidence Interval")
+        st.sidebar.subheader("6. Confidence Interval")
         confidence_pct = st.sidebar.slider(
             "Confidence level (%):",
             min_value=80,
@@ -922,8 +968,8 @@ def main():
         confidence_level = confidence_pct / 100.0  # Convert to decimal
         
         # LSTM-specific parameter
-        if model_choice == 'LSTM (Deep Learning)':
-            st.sidebar.subheader("6. LSTM Parameters")
+        if 'LSTM' in model_choice:
+            st.sidebar.subheader("7. LSTM Parameters")
             lookback_window = st.sidebar.slider(
                 "Lookback window (days):",
                 min_value=30,
@@ -934,7 +980,7 @@ def main():
             )
         
         # Optional technical indicators
-        st.sidebar.subheader("7. Technical Indicators (Optional)")
+        st.sidebar.subheader("8. Technical Indicators (Optional)")
         show_ma = st.sidebar.checkbox(
             "Show Moving Average",
             value=False,
@@ -969,20 +1015,65 @@ def main():
                 
                 try:
                     # Step 1: Validate and prepare data
+                    # Step 1: Validate and prepare data
                     df_clean = validate_and_prepare_data(df, date_col, price_col)
                     
-                    # Step 2: Split data for backtesting (80% train, 20% test)
-                    split_index = int(len(df_clean) * 0.8)
+                    # NEW: Filter data based on selected date range
+                    df_clean = df_clean[
+                        (df_clean[date_col].dt.date >= start_date) &
+                        (df_clean[date_col].dt.date <= end_date)
+                    ].reset_index(drop=True)
+                    
+                    # Check if enough data after filtering
+                    if len(df_clean) < 100:
+                        st.error("""
+                        ❌ **Insufficient data after filtering!**
+                        
+                        Please select a longer date range (at least 100 days).
+                        """)
+                        return
+                    
+                    # Step 2: NEW SPLIT LOGIC - Test size = forecast_days
+                    test_size = min(forecast_days, len(df_clean) - 100)
+                    
+                    if test_size < forecast_days:
+                        st.warning(f"⚠️ Test size adjusted to {test_size} days (requested {forecast_days}).")
+                    
+                    split_index = len(df_clean) - test_size
+                    
+                    if split_index < 100:
+                        st.error("""
+                        ❌ **Insufficient training data!**
+                        
+                        Please select a longer date range or reduce forecast horizon.
+                        """)
+                        return
+                    
+                    # For LSTM: Check lookback window
+                    if "LSTM" in model_choice:
+                        if lookback_window > split_index:
+                            st.error(f"❌ LSTM lookback window ({lookback_window}) > training data ({split_index}). Please reduce lookback.")
+                            return
+                    
                     train_data = df_clean[:split_index].copy()
                     test_data = df_clean[split_index:].copy()
                     
                     split_date = train_data[date_col].iloc[-1]
+                    train_start_date = train_data[date_col].min().date()
+                    train_end_date = train_data[date_col].max().date()
+                    test_start_date = test_data[date_col].min().date()
+                    test_end_date = test_data[date_col].max().date()
                     
                     st.info(f"""
-                    **Data Split:**
-                    - Training period: {train_data[date_col].min().date()} to {train_data[date_col].max().date()} ({len(train_data)} days)
-                    - Testing period: {test_data[date_col].min().date()} to {test_data[date_col].max().date()} ({len(test_data)} days)
-                    - Forecast horizon: {forecast_days} days
+                    **Training Setup:**
+                    - **Selected period:** {start_date} to {end_date} ({len(df_clean):,} days total)
+                    - **Training data:** {train_start_date} to {train_end_date} ({len(train_data):,} days)
+                    - **Test data (last {test_size} days):** {test_start_date} to {test_end_date} ({len(test_data)} days)
+                    - **Forecast horizon:** {forecast_days} days into future
+                    
+                    **Evaluation Strategy:**
+                    Model trained up to {train_end_date}, tested on last {test_size} days.
+                    This evaluates the {test_size}-day forecasting accuracy.
                     """)
                     
                     # Step 3: Train model and generate forecast
@@ -995,17 +1086,13 @@ def main():
                         )
                         
                         # Get predictions for test period (for backtesting)
-                        test_forecast = forecast[forecast['ds'].isin(test_data[date_col])]
-                        test_predictions = test_forecast['yhat'].values[:len(test_data)]
+                        test_predictions = model.predict(test_data.rename(columns={date_col:'ds'}))['yhat'].values
                         
                         # Calculate metrics on test set
-                        if len(test_predictions) > 0:
-                            mae, rmse = calculate_metrics(
-                                test_data[price_col].values[:len(test_predictions)],
-                                test_predictions
-                            )
-                        else:
-                            mae, rmse = 0, 0
+                        mae, rmse = calculate_metrics(
+                            test_data[price_col].values,
+                            test_predictions
+                        )
                         
                         # Get future forecast (beyond training data)
                         future_forecast = forecast[forecast['ds'] > train_data[date_col].max()]
@@ -1037,8 +1124,8 @@ def main():
                         forecast = pd.DataFrame({
                             'ds': future_dates,
                             'yhat': forecast_values,
-                            'yhat_lower': conf_int.iloc[:, 0].values,
-                            'yhat_upper': conf_int.iloc[:, 1].values
+                            'yhat_lower': conf_int[:, 0],
+                            'yhat_upper': conf_int[:, 1]
                         })
                     
                     elif model_choice == 'LSTM (Deep Learning)':
