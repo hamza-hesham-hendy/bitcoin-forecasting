@@ -901,6 +901,14 @@ def main():
             st.sidebar.error("❌ Could not detect price columns. Please check your CSV format.")
             return
         
+        # Filter to only columns that actually contain numeric data
+        # Catches CSVs where a column is named 'Close' but contains text
+        valid_price_cols = [col for col in price_cols if pd.api.types.is_numeric_dtype(df[col])]
+        if not valid_price_cols:
+            st.sidebar.error("❌ The detected price columns do not contain numeric data. This does not look like a valid financial dataset.")
+            return
+        price_cols = valid_price_cols
+        
         st.sidebar.subheader("2. Select Price Column")
         price_col = st.sidebar.selectbox(
             "Choose price to forecast:",
@@ -1317,10 +1325,6 @@ def main():
                     - The model predicts Bitcoin will **{direction}** by approximately **{abs(price_change_pct):.2f}%** over the next {forecast_days} days.
                     - Current price: **${current_price:,.2f}**
                     - Forecasted price: **${forecasted_price:,.2f}** (±${abs(last_forecast['yhat_upper'] - last_forecast['yhat_lower'])/2:,.2f})
-                    
-                    ⚠️ **Important:** Cryptocurrency markets are highly volatile. This forecast is based on historical patterns 
-                    and should not be used as the sole basis for investment decisions. Always conduct thorough research and 
-                    consider consulting with a financial advisor.
                     """)
                     
                     # Step 8: Export forecast data
