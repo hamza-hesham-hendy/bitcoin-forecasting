@@ -14,7 +14,7 @@ The app lets you upload a Bitcoin historical dataset (CSV or ZIP), pick a traini
 
 This project was built and tested using the **Bitcoin Historical Data** dataset from Kaggle:
 
-> 📦 [Bitcoin Historical Data (2014–2024) — Kaggle](https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data)
+> 📦 [Bitcoin Historical Data (2012–2026) — Kaggle](https://www.kaggle.com/datasets/mczielinski/bitcoin-historical-data)
 
 The dataset provides minute-level BTC/USD OHLCV data from January 2012 onwards. Because it is ~200 MB at minute resolution, it is recommended to either:
 - **ZIP it before uploading** — the app auto-extracts and resamples to daily frequency, or
