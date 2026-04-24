@@ -325,9 +325,9 @@ def build_lstm_model(lookback_window):
     
     Architecture:
     1. LSTM layer (50 units) - learns temporal patterns
-    2. Dropout (20%) - prevents overfitting
+    2. Dropout (30%) - prevents overfitting
     3. LSTM layer (50 units) - deeper learning
-    4. Dropout (20%)
+    4. Dropout (30%)
     5. Dense layer (25 units) - feature extraction
     6. Dense layer (1 unit) - final prediction
     
