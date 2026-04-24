@@ -11,7 +11,7 @@ Supported models:
 
 Other features:
 - CSV and ZIP file upload with automatic column detection
-- Automatic downsampling for high-frequency (minute-level) data
+- Automatic downsampling for high-frequency data
 - Selectable training date range
 - Dynamic test set matching the chosen forecast horizon
 - Interactive Plotly charts with confidence bands
@@ -29,17 +29,14 @@ import zipfile
 import io
 warnings.filterwarnings('ignore')
 
-# Import forecasting libraries
 from prophet import Prophet
 from statsmodels.tsa.arima.model import ARIMA
 from pmdarima import auto_arima
 
-# Deep learning — keras is bundled with tensorflow-cpu in requirements.txt
 from keras.models import Sequential
 from keras.layers import LSTM, Dense, Dropout
 from keras.callbacks import EarlyStopping
 
-# Import metrics and preprocessing
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
 
@@ -69,21 +66,17 @@ def extract_csv_from_zip(zip_file):
         tuple: (DataFrame, filename) or (None, error_message)
     """
     try:
-        # Read the ZIP file
         with zipfile.ZipFile(zip_file, 'r') as zip_ref:
             # List all files in the ZIP
             file_list = zip_ref.namelist()
-            
             # Find CSV files (ignore hidden files and directories)
             csv_files = [f for f in file_list if f.endswith('.csv') and not f.startswith('__MACOSX')]
-            
+
             if not csv_files:
                 return None, "No CSV file found in ZIP archive"
+
+            csv_filename = csv_files[0] #if there are multiple csv files it will take the first one
             
-            # If multiple CSV files, use the first one
-            csv_filename = csv_files[0]
-            
-            # Extract and read the CSV
             with zip_ref.open(csv_filename) as csv_file:
                 df = pd.read_csv(csv_file)
             
@@ -102,20 +95,19 @@ def detect_date_column(df):
     Returns:
         str: Name of the detected date column, or None if not found
     """
-    # Common date column names in Kaggle Bitcoin datasets
     possible_date_cols = ['date', 'Date', 'timestamp', 'Timestamp', 'time', 'Time']
     
-    # First, check for exact matches
+    # check for exact matches
     for col in possible_date_cols:
         if col in df.columns:
             return col
     
-    # Second, check for columns containing date-like names
+    # check for columns containing date-like names
     for col in df.columns:
         if any(date_word in col.lower() for date_word in ['date', 'time', 'timestamp']):
             return col
     
-    # Third, try to detect by data type
+    # try to detect by data type
     for col in df.columns:
         try:
             pd.to_datetime(df[col])
@@ -162,36 +154,34 @@ def validate_and_prepare_data(df, date_col, price_col):
     Returns:
         DataFrame: Cleaned and validated data
     """
-    # Create a copy to avoid modifying original
     df_clean = df.copy()
     
-    # Convert date column to datetime
-    # Try different timestamp formats (UNIX timestamps can be seconds or milliseconds)
+    # Convert date column to datetime and try different timestamp formats 
     try:
-        # First try: assume it's already a date string
+        # assume it's already a date string
         df_clean[date_col] = pd.to_datetime(df_clean[date_col])
     except:
         try:
-            # Second try: UNIX timestamp in seconds
+            # UNIX timestamp in seconds
             df_clean[date_col] = pd.to_datetime(df_clean[date_col], unit='s')
         except:
             try:
-                # Third try: UNIX timestamp in milliseconds
+                # UNIX timestamp in milliseconds
                 df_clean[date_col] = pd.to_datetime(df_clean[date_col], unit='ms')
             except:
-                # Last resort: let pandas figure it out
+                #let pandas figure it out
                 df_clean[date_col] = pd.to_datetime(df_clean[date_col], infer_datetime_format=True)
     
-    # Sort chronologically (oldest to newest)
+    # Sort oldest to newest
     df_clean = df_clean.sort_values(by=date_col).reset_index(drop=True)
     
     # Keep only date and price columns
     df_clean = df_clean[[date_col, price_col]].copy()
     
-    # Handle missing values - forward fill, then backward fill
+    # Handle missing values
     df_clean[price_col] = df_clean[price_col].fillna(method='ffill').fillna(method='bfill')
     
-    # Drop any remaining NaN rows
+    # Drop NaN rows
     df_clean = df_clean.dropna()
     
     return df_clean
@@ -225,34 +215,25 @@ def train_prophet_model(train_data, date_col, price_col, forecast_days, confiden
         date_col: Name of date column
         price_col: Name of price column
         forecast_days: Number of days to forecast
-        confidence_interval: Confidence level (e.g., 0.8 for 80%)
+        confidence_interval: Confidence level
     
     Returns:
         tuple: (trained model, forecast DataFrame)
     """
-    # Prepare data in Prophet format
     prophet_df = pd.DataFrame({
-        'ds': train_data[date_col],  # 'ds' = datestamp
-        'y': train_data[price_col]    # 'y' = value to forecast
+        'ds': train_data[date_col],
+        'y': train_data[price_col]
     })
     
-    # Initialize Prophet model
-    # interval_width: controls the uncertainty interval (80% or 95%)
     model = Prophet(
         interval_width=confidence_interval,
-        daily_seasonality=True,      # Bitcoin trades 24/7
-        weekly_seasonality=True,     # Weekly patterns in crypto
-        yearly_seasonality=True      # Long-term trends
+        daily_seasonality=True,
+        weekly_seasonality=True,
+        yearly_seasonality=True 
     )
     
-    # Fit the model on training data
     model.fit(prophet_df)
-    
-    # Create future dataframe for forecasting
-    # This generates dates for prediction
     future = model.make_future_dataframe(periods=forecast_days, freq='D')
-    
-    # Generate forecast
     forecast = model.predict(future)
     
     return model, forecast
@@ -276,49 +257,26 @@ def train_arima_model(train_data, price_col, forecast_days, confidence_level):
     Returns:
         tuple: (trained model, forecast values, confidence intervals)
     """
-    
-    # NOTE: ARIMA multi-step forecasts on financial data (like Bitcoin) will appear
-    # as a near-horizontal line. ARIMA requires stationarity, so it models day-to-day price *changes*
-    # rather than prices directly (d=1 differencing). When forecasting multiple
-    # steps ahead, the AR coefficients decay exponentially toward zero, meaning the
-    # model's best guess for each future day converges to the last known price.
-    # This is ARIMA's way of saying: "Bitcoin prices follow a near-random walk and
-    # future direction cannot be reliably predicted with this model."
-    # min_p=1 ensures at least one AR term is always included (rather than defaulting
-    # to a pure random walk), but the decay effect still applies for long horizons.
-    # For directional multi-step forecasts, use Prophet or LSTM instead.
 
-    # Extract price values as a series
     y = train_data[price_col].values
     
-    # Use auto_arima to find optimal parameters
-    # This automatically tests different (p,d,q) combinations
     auto_model = auto_arima(
-        y, start_p=1, start_q=1,   # begin search from p=1, q=1
+        y, start_p=1, start_q=1,
         min_p=1,                 # never allow p=0 — forces AR terms, avoids random walk
-        seasonal=False,           # Bitcoin doesn't have strict seasonal patterns
-        stepwise=True,            # Faster parameter search
-        suppress_warnings=True,   # Cleaner output
-        error_action='ignore',    # Skip problematic configurations
-        max_p=5, max_q=5,        # Limit parameter search range
-        max_d=2                   # Maximum differencing order
+        seasonal=False,
+        stepwise=True,
+        suppress_warnings=True,
+        error_action='ignore',
+        max_p=5, max_q=5,max_d=2
     )
     
-    # Get the best order (p,d,q)
     best_order = auto_model.order
     
-    # Train ARIMA model with best parameters
     model = ARIMA(y, order=best_order)
     fitted_model = model.fit()
     
-    # Generate forecast
-    # alpha = 1 - confidence_level (e.g., 0.2 for 80% confidence)
     forecast_result = fitted_model.forecast(steps=forecast_days, alpha=1-confidence_level)
-    
-    # Extract forecast and confidence intervals
     forecast_values = forecast_result
-    
-    # Get confidence intervals from the forecast summary
     forecast_summary = fitted_model.get_forecast(steps=forecast_days, alpha=1-confidence_level)
     conf_int = forecast_summary.conf_int()
     
@@ -349,12 +307,9 @@ def create_lstm_sequences(data, lookback_window):
     
     # Loop through the data to create sequences
     for i in range(lookback_window, len(data)):
-        # Input: last 'lookback_window' prices
         X.append(data[i-lookback_window:i])
-        # Output: next price
         y.append(data[i])
     
-    # Convert to numpy arrays
     X = np.array(X)
     y = np.array(y)
     
@@ -392,22 +347,17 @@ def build_lstm_model(lookback_window):
         return_sequences=True,
         input_shape=(lookback_window, 1)
     ))
-    model.add(Dropout(0.3))  # Drop 30% of connections to prevent overfitting
+    model.add(Dropout(0.3))
     
     # Second LSTM layer
     # return_sequences=False: only pass final output to Dense layer
     model.add(LSTM(units=64, return_sequences=False))
     model.add(Dropout(0.3))
     
-    # Dense layers for final prediction
-    model.add(Dense(units=32, activation='relu'))  # Hidden layer
-    model.add(Dense(units=1))   # Output layer (1 price prediction)
+    model.add(Dense(units=32, activation='relu'))
+    model.add(Dense(units=1)) # 1 price prediction
     
-    # Compile model
-    # Adam optimizer: adaptive learning rate
-    # MSE loss: mean squared error (good for regression)
     model.compile(optimizer='adam', loss='mean_squared_error')
-    
     return model
 
 def train_lstm_model(train_data, price_col, forecast_days, lookback_window=60):
@@ -429,32 +379,21 @@ def train_lstm_model(train_data, price_col, forecast_days, lookback_window=60):
     Returns:
         tuple: (model, scaler, forecast_values, training_data_scaled)
     """
-    # Step 1: Extract and scale price data
     prices = train_data[price_col].values.reshape(-1, 1)
     
-    # MinMaxScaler: transforms data to range [0, 1]
-    # Why? LSTM works better with normalized data
     scaler = MinMaxScaler(feature_range=(0, 1))
     prices_scaled = scaler.fit_transform(prices)
     
-    # Step 2: Create sequences for LSTM
     X_train, y_train = create_lstm_sequences(prices_scaled, lookback_window)
     
-    # Step 3: Build LSTM model
     model = build_lstm_model(lookback_window)
-    
-    # Step 4: Train the model
-    # Early stopping: stop training if validation loss doesn't improve
+
     early_stop = EarlyStopping(
         monitor='loss',
-        patience=10,      # Stop if no improvement for 10 epochs
+        patience=10,
         restore_best_weights=True
     )
     
-    # Train model
-    # epochs: number of full passes through training data
-    # batch_size: number of samples per gradient update
-    # verbose=0: silent training (no progress output)
     model.fit(
         X_train, y_train,
         epochs=50,
@@ -463,26 +402,20 @@ def train_lstm_model(train_data, price_col, forecast_days, lookback_window=60):
         callbacks=[early_stop]
     )
     
-    # Step 5: Generate forecast (multi-step ahead prediction)
     # Use the last 'lookback_window' prices as starting point
     last_sequence = prices_scaled[-lookback_window:]
     forecast_scaled = []
     
-    # Predict one day at a time, then use that prediction for the next day
     current_sequence = last_sequence.copy()
     
     for _ in range(forecast_days):
-        # Reshape for LSTM input: (1, lookback_window, 1)
         X_input = current_sequence.reshape(1, lookback_window, 1)
-        
-        # Predict next value
         next_pred = model.predict(X_input, verbose=0)[0][0]
         forecast_scaled.append(next_pred)
-        
-        # Update sequence: remove first value, append prediction
+        # Update sequence: remove first value, append prediction (slide window)
         current_sequence = np.append(current_sequence[1:], next_pred)
     
-    # Step 6: Inverse transform to get actual prices
+    # Inverse transform to get actual prices
     forecast_scaled = np.array(forecast_scaled).reshape(-1, 1)
     forecast_values = scaler.inverse_transform(forecast_scaled).flatten()
     
@@ -503,19 +436,13 @@ def calculate_lstm_confidence_interval(forecast_values, historical_errors, confi
     Returns:
         tuple: (lower_bound, upper_bound)
     """
-    # Calculate standard deviation of historical errors
     error_std = np.std(historical_errors)
     
-    # Z-score for confidence level
-    # 80% → 1.28, 90% → 1.645, 95% → 1.96
     from scipy import stats
     z_score = stats.norm.ppf((1 + confidence_level) / 2)
-    
-    # Calculate bounds
     margin = z_score * error_std
     lower_bound = forecast_values - margin
     upper_bound = forecast_values + margin
-    
     return lower_bound, upper_bound
 
 
@@ -541,7 +468,6 @@ def train_hybrid_model(df_clean, date_col, price_col, forecast_days, lookback_wi
     # Create sequences from residuals
     X_res, y_res = create_lstm_sequences(res_scaled, lookback_window)
     
-    # Build and Train the Residual LSTM
     res_model = Sequential([
         LSTM(128, return_sequences=True, input_shape=(lookback_window, 1)),
         Dropout(0.3),
@@ -568,7 +494,6 @@ def train_hybrid_model(df_clean, date_col, price_col, forecast_days, lookback_wi
         lstm_res_preds.append(next_res)
         curr_seq = np.append(curr_seq[1:], next_res)
         
-    # Inverse scale residuals
     lstm_res_final = res_scaler.inverse_transform(np.array(lstm_res_preds).reshape(-1, 1)).flatten()
     
     # --- PHASE 4: Combine Results ---
@@ -592,11 +517,7 @@ def calculate_metrics(actual, predicted):
     Returns:
         tuple: (MAE, RMSE) in USD
     """
-    # Mean Absolute Error: average absolute difference
     mae = mean_absolute_error(actual, predicted)
-    
-    # Root Mean Squared Error: square root of average squared difference
-    # RMSE penalizes larger errors more heavily than MAE
     rmse = np.sqrt(mean_squared_error(actual, predicted))
     
     return mae, rmse
@@ -620,30 +541,29 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
     """
     fig = go.Figure()
     
-    # 1. Plot historical prices (actual BTC prices)
+    # 1. Plot historical prices
     fig.add_trace(go.Scatter(
         x=historical_data[date_col],
         y=historical_data[price_col],
         mode='lines',
         name='Historical Price',
-        line=dict(color='#1f77b4', width=2),  # Blue line
+        line=dict(color='#1f77b4', width=2),
         hovertemplate='<b>Date:</b> %{x}<br><b>Price:</b> $%{y:,.2f}<extra></extra>'
     ))
     
-    # 2. Plot forecast (predicted future prices)
+    # 2. Plot forecast
     if model_name in ['Prophet', 'ARIMA']:
         if model_name == 'Prophet':
-            # Prophet stores predictions in 'yhat' column
             fig.add_trace(go.Scatter(
                 x=forecast_data['ds'],
                 y=forecast_data['yhat'],
                 mode='lines',
                 name='Forecast',
-                line=dict(color='#ff7f0e', width=2, dash='dash'),  # Orange dashed line
+                line=dict(color='#ff7f0e', width=2, dash='dash'),
                 hovertemplate='<b>Date:</b> %{x}<br><b>Forecast:</b> $%{y:,.2f}<extra></extra>'
             ))
             
-            # 3. Add confidence interval (uncertainty zone)
+            # 3. Add confidence interval
             fig.add_trace(go.Scatter(
                 x=forecast_data['ds'],
                 y=forecast_data['yhat_upper'],
@@ -660,13 +580,12 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
                 mode='lines',
                 name='Confidence Interval',
                 line=dict(width=0),
-                fillcolor='rgba(255, 127, 14, 0.2)',  # Light orange shading
-                fill='tonexty',  # Fill between this trace and previous (upper bound)
+                fillcolor='rgba(255, 127, 14, 0.2)',
+                fill='tonexty',
                 hovertemplate='<b>Lower:</b> $%{y:,.2f}<extra></extra>'
             ))
         
         elif model_name == 'ARIMA':
-            # ARIMA forecast
             fig.add_trace(go.Scatter(
                 x=forecast_data['ds'],
                 y=forecast_data['yhat'],
@@ -676,7 +595,7 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
                 hovertemplate='<b>Date:</b> %{x}<br><b>Forecast:</b> $%{y:,.2f}<extra></extra>'
             ))
             
-            # Confidence intervals for ARIMA
+            # Confidence intervals
             fig.add_trace(go.Scatter(
                 x=forecast_data['ds'],
                 y=forecast_data['yhat_upper'],
@@ -699,7 +618,7 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
     elif 'LSTM' in model_name:
         # LSTM or Hybrid forecast
         forecast_name = 'LSTM Forecast' if model_name == 'LSTM (Deep Learning)' else 'Hybrid Forecast'
-        forecast_color = '#2ca02c' if model_name == 'LSTM (Deep Learning)' else '#9467bd'  # Green for LSTM, purple for Hybrid
+        forecast_color = '#2ca02c'
         fig.add_trace(go.Scatter(
             x=forecast_data['ds'],
             y=forecast_data['yhat'],
@@ -730,7 +649,7 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
                 fill='tonexty'
             ))
     
-    # 4. Add moving average if provided (optional technical indicator)
+    # moving average if provided
     if ma_data is not None:
         fig.add_trace(go.Scatter(
             x=historical_data[date_col],
@@ -741,20 +660,19 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
             hovertemplate='<b>MA:</b> $%{y:,.2f}<extra></extra>'
         ))
     
-    # 5. Add vertical line marking the train/test split (without annotation)
+    # Add vertical line marking the train/test split
     fig.add_vline(
         x=split_date,
         line_dash="dash",
         line_color="red"
     )
     
-    # Configure layout for better readability
     fig.update_layout(
         title=f'Bitcoin Price Forecast - {model_name} Model',
         xaxis_title='Date',
         yaxis_title='Price (USD)',
-        hovermode='x unified',  # Show all values at same x-position
-        template='plotly_white',  # Clean white background
+        hovermode='x unified',
+        template='plotly_white',
         height=600,
         legend=dict(
             orientation="h",
@@ -765,7 +683,6 @@ def create_forecast_plot(historical_data, forecast_data, date_col, price_col,
         )
     )
     
-    # Format y-axis to show prices with comma separators
     fig.update_yaxes(tickformat='$,.0f')
     
     return fig
@@ -809,17 +726,14 @@ def main():
     
     # Only show controls if file is uploaded
     if uploaded_file is not None:
-        
-        # Read the file (CSV or ZIP)
         try:
             # Check file type
             file_type = uploaded_file.name.split('.')[-1].lower()
-            
             if file_type == 'zip':
                 # Extract CSV from ZIP
                 df, csv_filename = extract_csv_from_zip(uploaded_file)
                 if df is None:
-                    st.sidebar.error(f"❌ {csv_filename}")  # csv_filename contains error message
+                    st.sidebar.error(f"❌ {csv_filename}")
                     return
                 st.sidebar.success(f"✅ Extracted: {csv_filename}")
                 st.sidebar.write(f"📊 Dataset shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
@@ -829,7 +743,7 @@ def main():
                 st.sidebar.success(f"✅ File uploaded: {uploaded_file.name}")
                 st.sidebar.write(f"📊 Dataset shape: {df.shape[0]:,} rows × {df.shape[1]} columns")
             
-            # Check if data is very large (minute-level data)
+            # Check if data is very large
             if len(df) > 100000:
                 st.sidebar.warning(f"⚠️ Large dataset detected ({len(df):,} rows)")
                 
@@ -846,8 +760,6 @@ def main():
                     if temp_date_col:
                         with st.sidebar.expander("Downsampling in progress...", expanded=False):
                             st.write("Converting to daily data...")
-                            
-                            # Convert to datetime
                             try:
                                 df[temp_date_col] = pd.to_datetime(df[temp_date_col], unit='s')
                             except:
@@ -856,10 +768,8 @@ def main():
                                 except:
                                     st.error("Could not parse timestamps")
                             
-                            # Set as index for resampling
                             df = df.set_index(temp_date_col)
                             
-                            # Resample to daily (D) frequency
                             price_cols_map = {}
                             for col in df.columns:
                                 col_lower = col.lower()
@@ -878,7 +788,6 @@ def main():
                             
                             df = df.resample('D').agg(price_cols_map)
                             
-                            # Reset index to make date a column again
                             df = df.reset_index()
                             
                             st.sidebar.success(f"✅ Downsampled to {len(df):,} daily records")
@@ -887,7 +796,7 @@ def main():
             st.sidebar.error(f"❌ Error reading file: {str(e)}")
             return
         
-        # Automatically detect date column
+        # Detect date column
         date_col = detect_date_column(df)
         if date_col is None:
             st.sidebar.error("❌ Could not detect date column. Please check your CSV format.")
@@ -901,8 +810,6 @@ def main():
             st.sidebar.error("❌ Could not detect price columns. Please check your CSV format.")
             return
         
-        # Filter to only columns that actually contain numeric data
-        # Catches CSVs where a column is named 'Close' but contains text
         valid_price_cols = [col for col in price_cols if pd.api.types.is_numeric_dtype(df[col])]
         if not valid_price_cols:
             st.sidebar.error("❌ The detected price columns do not contain numeric data. This does not look like a valid financial dataset.")
@@ -916,16 +823,14 @@ def main():
             help="Select which price column to use for forecasting"
         )
         
-        # NEW: Prepare data to get date range
+        # Prepare data to get date range
         df_temp = validate_and_prepare_data(df, date_col, price_col)
         min_date = df_temp[date_col].min().date()
         max_date = df_temp[date_col].max().date()
         
-        # NEW: Date range selection
+        # Date range selection
         st.sidebar.subheader("3. Select Training Data Period")
         st.sidebar.write(f"📅 Available data: {min_date} to {max_date}")
-        
-        # Calculate default range (use last 3 years or all data if less)
         try:
             default_start = max(min_date, date(max_date.year - 3, max_date.month, max_date.day))
         except:
@@ -949,12 +854,10 @@ def main():
                 help="Last day of available data"
             )
         
-        # Validate date range
         if start_date >= end_date:
             st.sidebar.error("❌ Start date must be before end date!")
             return
         
-        # Calculate and display number of days
         num_days = (end_date - start_date).days
         st.sidebar.info(f"📊 Selected: **{num_days:,} days** of data")
         
@@ -973,7 +876,6 @@ def main():
             """
         )
         
-        # Forecast horizon
         st.sidebar.subheader("5. Forecast Horizon")
         forecast_days = st.sidebar.slider(
             "Days to forecast:",
@@ -984,7 +886,6 @@ def main():
             help="Number of days into the future to predict"
         )
         
-        # Confidence interval
         st.sidebar.subheader("6. Confidence Interval")
         confidence_pct = st.sidebar.slider(
             "Confidence level (%):",
@@ -994,8 +895,8 @@ def main():
             step=5,
             help="Higher confidence = wider uncertainty bands"
         )
-        confidence_level = confidence_pct / 100.0  # Convert to decimal
-        
+        confidence_level = confidence_pct / 100.0
+
         # LSTM-specific parameter
         if 'LSTM' in model_choice:
             st.sidebar.subheader("7. LSTM Parameters")
@@ -1008,7 +909,6 @@ def main():
                 help="Number of past days the LSTM uses to make predictions"
             )
         
-        # Optional technical indicators
         st.sidebar.subheader("8. Technical Indicators (Optional)")
         show_ma = st.sidebar.checkbox(
             "Show Moving Average",
@@ -1016,7 +916,7 @@ def main():
             help="Display 30-day Simple Moving Average on chart"
         )
         
-        ma_window = 30  # Fixed 30-day moving average
+        ma_window = 30
         
         # Generate forecast button
         st.sidebar.markdown("---")
@@ -1036,18 +936,13 @@ def main():
             st.dataframe(df.head(10), use_container_width=True)
             st.write(f"**Total records:** {len(df)}")
         
-        # Process and generate forecast when button is clicked
         if generate_button:
-            
-            # Progress indicator
             with st.spinner(f'🔄 Preparing data and training {model_choice} model...'):
                 
                 try:
-                    # Step 1: Validate and prepare data
-                    # Step 1: Validate and prepare data
                     df_clean = validate_and_prepare_data(df, date_col, price_col)
                     
-                    # NEW: Filter data based on selected date range
+                    # Filter data based on selected date range
                     df_clean = df_clean[
                         (df_clean[date_col].dt.date >= start_date) &
                         (df_clean[date_col].dt.date <= end_date)
@@ -1062,7 +957,7 @@ def main():
                         """)
                         return
                     
-                    # Step 2: NEW SPLIT LOGIC - Test size = forecast_days
+                    # SPLIT LOGIC - Test size = forecast_days
                     test_size = min(forecast_days, len(df_clean) - 100)
                     
                     if test_size < forecast_days:
@@ -1078,7 +973,6 @@ def main():
                         """)
                         return
                     
-                    # For LSTM: Check lookback window
                     if "LSTM" in model_choice:
                         if lookback_window > split_index:
                             st.error(f"❌ LSTM lookback window ({lookback_window}) > training data ({split_index}). Please reduce lookback.")
@@ -1105,51 +999,33 @@ def main():
                     This evaluates the {test_size}-day forecasting accuracy.
                     """)
                     
-                    # Step 3: Train model and generate forecast
+                    # Train model and generate forecast
                     if model_choice == 'Prophet':
-                        
-                        # Train Prophet model
                         model, forecast = train_prophet_model(
                             train_data, date_col, price_col, 
                             forecast_days, confidence_level
                         )
-                        
-                        # Get predictions for test period (for backtesting)
                         test_predictions = model.predict(test_data.rename(columns={date_col:'ds'}))['yhat'].values
-                        
-                        # Calculate metrics on test set
                         mae, rmse = calculate_metrics(
                             test_data[price_col].values,
                             test_predictions
                         )
-                        
-                        # Get future forecast (beyond training data)
-                        future_forecast = forecast[forecast['ds'] > train_data[date_col].max()]
-                    
+
                     elif model_choice == 'ARIMA':
-                        
-                        # Train ARIMA model
                         model, forecast_values, conf_int = train_arima_model(
                             train_data, price_col, forecast_days, confidence_level
                         )
-                        
-                        # Get predictions for test period
                         test_predictions = model.forecast(steps=len(test_data))
-                        
-                        # Calculate metrics on test set
                         mae, rmse = calculate_metrics(
                             test_data[price_col].values,
                             test_predictions
-                        )
-                        
-                        # Create forecast dataframe for plotting
+                        )                        
                         last_date = train_data[date_col].max()
                         future_dates = pd.date_range(
                             start=last_date + timedelta(days=1),
                             periods=forecast_days,
                             freq='D'
-                        )
-                        
+                        )    
                         forecast = pd.DataFrame({
                             'ds': future_dates,
                             'yhat': forecast_values,
@@ -1158,47 +1034,31 @@ def main():
                         })
                     
                     elif model_choice == 'LSTM (Deep Learning)':
-                        
-                        # Train LSTM model
                         lstm_model, scaler, forecast_values, prices_scaled = train_lstm_model(
                             train_data, price_col, forecast_days, lookback_window
                         )
-                        
-                        # For backtesting: predict on test set
-                        # Use last lookback_window from training + test data
+
                         all_prices = df_clean[price_col].values.reshape(-1, 1)
                         all_prices_scaled = scaler.transform(all_prices)
-                        
-                        # Create test sequences
                         X_test, y_test = create_lstm_sequences(
                             all_prices_scaled[split_index-lookback_window:],
                             lookback_window
                         )
                         
-                        # Predict on test set
                         test_predictions_scaled = lstm_model.predict(X_test, verbose=0)
                         test_predictions = scaler.inverse_transform(test_predictions_scaled).flatten()
-                        
-                        # Calculate metrics
                         actual_test = test_data[price_col].values[:len(test_predictions)]
                         mae, rmse = calculate_metrics(actual_test, test_predictions)
-                        
-                        # Calculate historical errors for confidence interval
                         historical_errors = actual_test - test_predictions
-                        
-                        # Calculate confidence intervals for forecast
                         lower_bound, upper_bound = calculate_lstm_confidence_interval(
                             forecast_values, historical_errors, confidence_level
                         )
-                        
-                        # Create forecast dataframe
                         last_date = train_data[date_col].max()
                         future_dates = pd.date_range(
                             start=last_date + timedelta(days=1),
                             periods=forecast_days,
                             freq='D'
                         )
-                        
                         forecast = pd.DataFrame({
                             'ds': future_dates,
                             'yhat': forecast_values,
@@ -1207,22 +1067,12 @@ def main():
                         })
                         
                     elif model_choice == 'Hybrid (Prophet + LSTM)':
-                        # Use the hybrid function we defined earlier
                         m, res_model, hybrid_vals, future_dates = train_hybrid_model(
                             train_data, date_col, price_col, forecast_days, lookback_window
                         )
-                        
-                        # Calculate Backtesting Metrics (on test set)
-                        # Predict Prophet trend on test dates
                         test_prophet = m.predict(test_data.rename(columns={date_col:'ds'}))['yhat'].values
-                        
-                        # Predict LSTM residuals on test period
-                        # (Using the same logic as the future forecast but for test data)
-                        test_predictions = test_prophet # Simplification: base trend + LSTM corrections
-                        
+                        test_predictions = test_prophet 
                         mae, rmse = calculate_metrics(test_data[price_col].values, test_predictions)
-                        
-                        # Create forecast dataframe for plotting
                         forecast = pd.DataFrame({
                             'ds': future_dates,
                             'yhat': hybrid_vals,
@@ -1230,7 +1080,7 @@ def main():
                             'yhat_upper': hybrid_vals * (1 + (1 - confidence_level))
                         })
                     
-                    # Step 4: Display metrics
+                    # Display metrics
                     st.subheader("📈 Model Performance (Backtesting)")
                     col1, col2, col3 = st.columns(3)
                     
@@ -1249,7 +1099,7 @@ def main():
                         )
                     
                     with col3:
-                        # Calculate percentage error
+                        # percentage error
                         avg_price = test_data[price_col].mean()
                         mape = (mae / avg_price) * 100
                         st.metric(
@@ -1265,12 +1115,12 @@ def main():
                     - MAPE shows that predictions were off by about {mape:.1f}% on average.
                     """)
                     
-                    # Step 5: Calculate moving average if requested
+                    # Calculate moving average
                     ma_data = None
                     if show_ma:
                         ma_data = calculate_moving_average(df_clean, price_col, ma_window)
                     
-                    # Step 6: Create visualization
+                    # Create visualization
                     st.subheader("📊 Interactive Forecast Visualization")
                     
                     fig = create_forecast_plot(
@@ -1280,11 +1130,9 @@ def main():
                     
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Step 7: Show forecast summary
+                    # Show forecast summary
                     st.subheader("🔮 Forecast Summary")
                     
-                    # Get first and last forecast values
-                    first_forecast = forecast.iloc[0]
                     last_forecast = forecast.iloc[-1]
                     
                     current_price = train_data[price_col].iloc[-1]
@@ -1316,7 +1164,6 @@ def main():
                             help="Difference between current and forecasted price"
                         )
                     
-                    # Interpretation
                     direction = "increase" if price_change > 0 else "decrease"
                     st.success(f"""
                     **Forecast Interpretation:**
@@ -1327,7 +1174,7 @@ def main():
                     - Forecasted price: **${forecasted_price:,.2f}** (±${abs(last_forecast['yhat_upper'] - last_forecast['yhat_lower'])/2:,.2f})
                     """)
                     
-                    # Step 8: Export forecast data
+                    # Export forecast data
                     st.subheader("💾 Export Forecast Data")
                     
                     forecast_export = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
@@ -1346,11 +1193,9 @@ def main():
                     st.exception(e)
         
         else:
-            # Show instructions when button hasn't been clicked
             st.info("👆 Configure your settings in the sidebar and click **Generate Forecast** to begin!")
     
     else:
-        # Show instructions when no file is uploaded
         st.info("👈 Please upload a Bitcoin CSV file from the sidebar to get started!")
         
         st.markdown("""
@@ -1363,12 +1208,12 @@ def main():
 
         ### Available Models
 
-        | Model | Best For | Training Time |
-        |-------|----------|---------------|
-        | **Prophet** | Strong trends & seasonality | ~10–30 s |
-        | **ARIMA** | Classical baseline, short horizons | ~20–60 s |
-        | **LSTM** | Complex non-linear patterns | ~60–120 s |
-        | **Hybrid (Prophet + LSTM)** | Global trend + local residual correction | ~90–150 s |
+        | Model | Best For |
+        |-------|----------|
+        | **Prophet** | Strong trends & seasonality|
+        | **ARIMA** | Classical baseline, short horizons |
+        | **LSTM** | Complex non-linear patterns |
+        | **Hybrid (Prophet + LSTM)** | Global trend + local residual correction |
 
         ### Supported Data Formats
 
@@ -1380,17 +1225,12 @@ def main():
         frequency automatically — no pre-processing needed.
         """)
     
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: gray;'>
         <p>Built with Streamlit · Plotly · Prophet · ARIMA · TensorFlow-CPU / Keras (LSTM) · scikit-learn</p>
     </div>
     """, unsafe_allow_html=True)
-
-# =============================================================================
-# RUN APPLICATION
-# =============================================================================
 
 if __name__ == "__main__":
     main()
